@@ -1,17 +1,19 @@
 """PSM diagnostic visualization — matplotlib only, zero extra deps"""
 
 import matplotlib
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def _is_interactive():
     """Check if we're in an interactive environment (notebook, IDE, etc.)"""
     try:
-        shell = get_ipython().__class__.__name__
+        get_ipython().__class__.__name__
         return True
     except NameError:
-        return matplotlib.get_backend().lower() in ("tkagg", "qtagg", "qt5agg", "macosx")
+        return matplotlib.get_backend().lower() in (
+            "tkagg", "qtagg", "qt5agg", "macosx",
+        )
 
 
 def plot_psm_report(
@@ -40,10 +42,20 @@ def plot_psm_report(
     ax = axes[0, 0]
     t_mask = treatment == 1
     c_mask = treatment == 0
-    ax.hist(propensity_scores[t_mask], bins=30, alpha=0.5, color="red",
-            label=f"Treatment (n={t_mask.sum()})")
-    ax.hist(propensity_scores[c_mask], bins=30, alpha=0.5, color="blue",
-            label=f"Control (n={c_mask.sum()})")
+    ax.hist(
+        propensity_scores[t_mask],
+        bins=30,
+        alpha=0.5,
+        color="red",
+        label=f"Treatment (n={t_mask.sum()})",
+    )
+    ax.hist(
+        propensity_scores[c_mask],
+        bins=30,
+        alpha=0.5,
+        color="blue",
+        label=f"Control (n={c_mask.sum()})",
+    )
     ax.set_xlabel("Propensity Score")
     ax.set_ylabel("Frequency")
     ax.set_title("Propensity Score Distribution (Before Matching)")
@@ -54,14 +66,30 @@ def plot_psm_report(
     n_feat = len(balance_df)
     y_pos = np.arange(n_feat)
     bar_h = 0.35
-    ax.barh(y_pos - bar_h / 2, balance_df["SMD_before"], bar_h,
-            color="gray", alpha=0.6, label="Before Matching")
-    ax.barh(y_pos + bar_h / 2, balance_df["SMD_after"], bar_h,
-            color="green", alpha=0.7, label="After Matching")
-    ax.axvline(x=0.1, color="orange", linestyle="--", linewidth=1,
-               label="|SMD| = 0.1 (good)")
-    ax.axvline(x=0.2, color="red", linestyle=":", linewidth=1,
-               label="|SMD| = 0.2 (fair)")
+    ax.barh(
+        y_pos - bar_h / 2,
+        balance_df["SMD_before"],
+        bar_h,
+        color="gray",
+        alpha=0.6,
+        label="Before Matching",
+    )
+    ax.barh(
+        y_pos + bar_h / 2,
+        balance_df["SMD_after"],
+        bar_h,
+        color="green",
+        alpha=0.7,
+        label="After Matching",
+    )
+    ax.axvline(
+        x=0.1, color="orange", linestyle="--", linewidth=1,
+        label="|SMD| = 0.1 (good)",
+    )
+    ax.axvline(
+        x=0.2, color="red", linestyle=":", linewidth=1,
+        label="|SMD| = 0.2 (fair)",
+    )
     ax.set_yticks(y_pos)
     ax.set_yticklabels(balance_df["feature"], fontsize=8)
     ax.invert_yaxis()
@@ -71,14 +99,17 @@ def plot_psm_report(
 
     # ---- Panel 3: Treatment Effect (ATT) ----
     ax = axes[1, 0]
-    if att is not None:
+    if att is not None and att_ci is not None:
         y_t = outcome[matched_treated]
         y_c = outcome[matched_control]
-        ax.violinplot([y_t, y_c], positions=[1, 0], showmeans=True, showmedians=True)
+        positions = [1, 0]
+        ax.violinplot(
+            [y_t, y_c], positions=positions, showmeans=True, showmedians=True,
+        )
         ax.set_xticks([0, 1])
         ax.set_xticklabels(["Matched Control", "Treated"])
         ax.set_ylabel("Outcome")
-        ci_str = f"  [{att_ci[0]:.4f}, {att_ci[1]:.4f}]" if att_ci else ""
+        ci_str = f"  [{att_ci[0]:.4f}, {att_ci[1]:.4f}]"
         ax.set_title(f"ATT = {att:.4f}{ci_str}")
 
     # ---- Panel 4: First Covariate Distribution ----
