@@ -11,8 +11,12 @@ PSMatcher — 一步式倾向得分匹配 (Propensity Score Matching)
 6. model_summary()                → 倾向模型诊断
 """
 
-import warnings
+from __future__ import annotations
 
+import warnings
+from typing import Optional, Tuple, Union, List
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -36,35 +40,42 @@ class PSMatcher:
         推荐值 0.2（Austin 2011），在 logit(PS) 尺度上施加。
     """
 
-    def __init__(self, random_state=42, caliper=None):
+    def __init__(
+        self, random_state: int = 42, caliper: Optional[float] = None
+    ) -> None:
         self.random_state = random_state
         self.caliper = caliper
 
         # Internal state
-        self.X_ = None
-        self.feature_names_ = None
-        self.treatment_ = None
-        self.outcome_ = None
-        self.propensity_scores_ = None
-        self.logit_ps_ = None
-        self.scaler_ = None
-        self.ps_model_ = None
-        self.model_info_ = None
+        self.X_: Optional[np.ndarray] = None
+        self.feature_names_: Optional[List[str]] = None
+        self.treatment_: Optional[np.ndarray] = None
+        self.outcome_: Optional[np.ndarray] = None
+        self.propensity_scores_: Optional[np.ndarray] = None
+        self.logit_ps_: Optional[np.ndarray] = None
+        self.scaler_: Optional[StandardScaler] = None
+        self.ps_model_: Optional[LogisticRegression] = None
+        self.model_info_: Optional[dict] = None
 
-        self.matched_treated_ = None
-        self.matched_control_ = None
-        self.is_matched_ = None
+        self.matched_treated_: Optional[List[int]] = None
+        self.matched_control_: Optional[List[int]] = None
+        self.is_matched_: Optional[np.ndarray] = None
 
-        self.att_ = None
-        self.att_se_ = None
-        self.att_ci_ = None
+        self.att_: Optional[float] = None
+        self.att_se_: Optional[float] = None
+        self.att_ci_: Optional[Tuple[float, float]] = None
         self._is_fitted = False
         self._is_matched = False
 
     # ================================================================
     # Step 1: 估计倾向得分
     # ================================================================
-    def fit(self, X, treatment, outcome):
+    def fit(
+        self,
+        X: Union[np.ndarray, pd.DataFrame],
+        treatment: Union[np.ndarray, list],
+        outcome: Union[np.ndarray, list],
+    ) -> PSMatcher:
         """估计倾向得分 P(T=1 | X)
 
         Parameters
@@ -109,6 +120,12 @@ class PSMatcher:
             random_state=self.random_state,
         )
         self.ps_model_.fit(X_scaled, treatment)
+        if self.ps_model_.n_iter_[0] >= self.ps_model_.max_iter:
+            warnings.warn(
+                f"LogisticRegression did not converge after {self.ps_model_.max_iter} "
+                "iterations. Consider increasing max_iter or checking for collinearity.",
+                UserWarning,
+            )
         self.propensity_scores_ = self.ps_model_.predict_proba(X_scaled)[:, 1]
 
         # 计算 logit(PS)，用于 caliper 和匹配距离
@@ -132,7 +149,14 @@ class PSMatcher:
     # ================================================================
     # Step 2: 匹配
     # ================================================================
-    def match(self, method="nearest", k=1, with_replacement=False):
+    def match(
+        self,
+        method: str = "nearest",
+        k: int = 1,
+        with_replacement: bool = False,
+        caliper: Optional[float] = None,
+        trim_common_support: bool = False,
+    ) -> PSMatcher:
         """执行倾向得分匹配
 
         Parameters
@@ -143,12 +167,18 @@ class PSMatcher:
             每个处理单元匹配的对照单元数量（1:k 匹配）
         with_replacement : bool, default=False
             是否允许重复匹配（有放回）。设为 True 时同一对照单元可被多次匹配。
+        caliper : float or None, default=None
+            覆盖构造函数中的 caliper 值。None 表示使用构造时设定的值。
+        trim_common_support : bool, default=False
+            是否在匹配前修剪公共支持区外的单元。修剪后可减少无效匹配。
 
         Returns
         -------
         self : PSMatcher
         """
         self._check_fitted()
+
+        caliper = caliper if caliper is not None else self.caliper
 
         treated_idx = np.where(self.treatment_ == 1)[0]
         control_idx = np.where(self.treatment_ == 0)[0]
@@ -165,14 +195,39 @@ class PSMatcher:
             )
 
         # 匹配前检查 common support
-        self._check_common_support(treated_idx, control_idx)
+        if trim_common_support:
+            n_before_t, n_before_c = len(treated_idx), len(control_idx)
+            treated_idx, control_idx = self._trim_common_support(
+                treated_idx, control_idx
+            )
+            n_dropped_t = n_before_t - len(treated_idx)
+            n_dropped_c = n_before_c - len(control_idx)
+            if n_dropped_t > 0 or n_dropped_c > 0:
+                print(
+                    f"Trimmed common support: dropped {n_dropped_t} treated + "
+                    f"{n_dropped_c} control unit(s) outside overlapping PS range."
+                )
+            if len(treated_idx) == 0:
+                raise ValueError(
+                    "No treated units remain after trimming common support. "
+                    "Relax the trimming criterion or check your propensity model."
+                )
+            if len(control_idx) == 0:
+                raise ValueError(
+                    "No control units remain after trimming common support."
+                )
+        else:
+            self._check_common_support(treated_idx, control_idx)
 
         self.matched_treated_ = []
         self.matched_control_ = []
         self.is_matched_ = np.zeros(len(self.treatment_), dtype=bool)
+        self.att_ = None
+        self.att_se_ = None
+        self.att_ci_ = None
 
         if method == "nearest":
-            self._match_nearest(treated_idx, control_idx, k, with_replacement)
+            self._match_nearest(treated_idx, control_idx, k, with_replacement, caliper)
         else:
             raise ValueError(f"Unsupported matching method: {method}")
 
@@ -181,7 +236,7 @@ class PSMatcher:
 
         msg = f"Matched: {n_unique_treated}/{len(treated_idx)} treated units"
         if n_unique_treated < len(treated_idx):
-            if self.caliper:
+            if caliper:
                 msg += " (some dropped by caliper)"
             else:
                 msg += " (insufficient unique controls; try with_replacement=True)"
@@ -195,7 +250,7 @@ class PSMatcher:
             dropped = len(treated_idx) - n_unique_treated
             suggestion = (
                 "Consider increasing caliper or using with_replacement=True."
-                if self.caliper
+                if caliper
                 else "Consider using with_replacement=True."
             )
             warnings.warn(
@@ -206,18 +261,25 @@ class PSMatcher:
 
         return self
 
-    def _match_nearest(self, treated_idx, control_idx, k, with_replacement):
+    def _match_nearest(
+        self,
+        treated_idx: np.ndarray,
+        control_idx: np.ndarray,
+        k: int,
+        with_replacement: bool,
+        caliper: Optional[float],
+    ) -> None:
         """在 logit(PS) 尺度上执行最近邻匹配"""
         logit_treated = self.logit_ps_[treated_idx].reshape(-1, 1)
         logit_control = self.logit_ps_[control_idx].reshape(-1, 1)
 
         n_neighbors = min(k, len(control_idx))
-        nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree")
+        nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="kd_tree")
         nbrs.fit(logit_control)
         distances, indices = nbrs.kneighbors(logit_treated)
 
         caliper_val = (
-            self.caliper * np.std(self.logit_ps_) if self.caliper else None
+            caliper * np.std(self.logit_ps_) if caliper else None
         )
         used_control = set() if not with_replacement else None
 
@@ -260,7 +322,9 @@ class PSMatcher:
                 UserWarning,
             )
 
-    def _check_common_support(self, treated_idx, control_idx):
+    def _check_common_support(
+        self, treated_idx: np.ndarray, control_idx: np.ndarray
+    ) -> None:
         """检查处理组与对照组倾向得分的重叠区域 (common support)"""
         ps_t = self.propensity_scores_[treated_idx]
         ps_c = self.propensity_scores_[control_idx]
@@ -280,10 +344,29 @@ class PSMatcher:
                 UserWarning,
             )
 
+    def _trim_common_support(
+        self, treated_idx: np.ndarray, control_idx: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """修剪公共支持区外的单元"""
+        ps_t = self.propensity_scores_[treated_idx]
+        ps_c = self.propensity_scores_[control_idx]
+
+        lo = max(ps_t.min(), ps_c.min())
+        hi = min(ps_t.max(), ps_c.max())
+
+        t_keep = (ps_t >= lo) & (ps_t <= hi)
+        c_keep = (ps_c >= lo) & (ps_c <= hi)
+        return treated_idx[t_keep], control_idx[c_keep]
+
     # ================================================================
     # Step 3: 估计处理效应
     # ================================================================
-    def estimate_effect(self, alpha=0.05, bootstrap=False, n_bootstrap=1000):
+    def estimate_effect(
+        self,
+        alpha: float = 0.05,
+        bootstrap: bool = False,
+        n_bootstrap: int = 1000,
+    ) -> PSMatcher:
         """计算平均处理效应（ATT = Average Treatment Effect on the Treated）
 
         ATT = E[Y(1) - Y(0) | T=1]
@@ -313,7 +396,7 @@ class PSMatcher:
         self.att_ = float(np.mean(diffs))
 
         if bootstrap:
-            rng = np.random.RandomState(self.random_state)
+            rng = np.random.default_rng(self.random_state)
             atts = np.zeros(n_bootstrap)
             for b in range(n_bootstrap):
                 boot_idx = rng.choice(n, size=n, replace=True)
@@ -333,26 +416,27 @@ class PSMatcher:
         print(f"ATT = {self.att_:.4f}  [{self.att_ci_[0]:.4f}, {self.att_ci_[1]:.4f}]")
         return self
 
-    def _compute_matched_diffs(self):
+    def _compute_matched_diffs(self) -> np.ndarray:
         """计算每处理单元的匹配结果差异（处理 k:1 匹配）"""
         treated_arr = np.array(self.matched_treated_)
         control_arr = np.array(self.matched_control_)
 
-        unique_treated = np.unique(treated_arr)
-        diffs = np.zeros(len(unique_treated))
-
-        for idx, t_idx in enumerate(unique_treated):
-            y_t = self.outcome_[t_idx]
-            c_indices = control_arr[treated_arr == t_idx]
-            y_c_mean = np.mean(self.outcome_[c_indices])
-            diffs[idx] = y_t - y_c_mean
-
-        return diffs
+        unique_treated, inverse, counts = np.unique(
+            treated_arr, return_inverse=True, return_counts=True
+        )
+        sums = np.bincount(
+            inverse, weights=self.outcome_[control_arr], minlength=len(unique_treated)
+        )
+        means = sums / counts
+        y_treated = self.outcome_[unique_treated]
+        return y_treated - means
 
     # ================================================================
     # Step 4: 平衡性诊断
     # ================================================================
-    def balance_check(self, thresholds=(0.1, 0.2)):
+    def balance_check(
+        self, thresholds: Tuple[float, float] = (0.1, 0.2)
+    ) -> pd.DataFrame:
         """协变量平衡性检查 —— 匹配前后的标准化均值差异 (SMD)
 
         SMD = (M_t - M_c) / sqrt((S_t^2 + S_c^2) / 2)
@@ -407,16 +491,16 @@ class PSMatcher:
         return balance_df
 
     @staticmethod
-    def _smd(x1, x2):
+    def _smd(x1: np.ndarray, x2: np.ndarray) -> float:
         """标准化均值差异 (Standardized Mean Difference)"""
-        v1, v2 = np.var(x1, ddof=0), np.var(x2, ddof=0)
+        v1, v2 = np.var(x1, ddof=1), np.var(x2, ddof=1)
         denom = np.sqrt((v1 + v2) / 2)
         return (np.mean(x1) - np.mean(x2)) / denom if denom > 1e-10 else 0.0
 
     # ================================================================
     # 倾向模型诊断
     # ================================================================
-    def model_summary(self):
+    def model_summary(self) -> None:
         """打印倾向得分模型的诊断信息
 
         包括 AUC、样本量分布、极端倾向得分等，帮助判断倾向模型是否充分。
@@ -463,7 +547,7 @@ class PSMatcher:
     # ================================================================
     # Step 5: 综合报告
     # ================================================================
-    def summary(self):
+    def summary(self) -> None:
         """打印完整的 PSM Analysis Report"""
         self._check_matched()
 
@@ -505,14 +589,14 @@ class PSMatcher:
     # ================================================================
     # Step 6: 可视化
     # ================================================================
-    def plot(self, figsize=(12, 8)):
+    def plot(self, figsize: Tuple[float, float] = (12, 8)) -> plt.Figure:
         """生成 PSM 诊断图
 
         包含:
         1. 倾向得分分布（匹配前）
         2. 协变量平衡性对比（SMD before vs after）
         3. 处理效应 (ATT) 图示
-        4. 首个协变量分布对比
+        4. SMD 最大的协变量分布对比
         """
         self._check_matched()
 
@@ -531,19 +615,59 @@ class PSMatcher:
         )
 
     # ================================================================
+    # 属性 & 表示
+    # ================================================================
+    def __repr__(self) -> str:
+        parts = ["PSMatcher("]
+        if self._is_fitted:
+            parts.append(f"n={self.model_info_['n_samples']}, ")
+            parts.append(f"features={self.model_info_['n_features']}, ")
+            parts.append(f"AUC={self.model_info_['auc']:.3f}")
+            if self._is_matched:
+                n_t = len(set(self.matched_treated_))
+                parts.append(f", matched_treated={n_t}")
+                if self.att_ is not None:
+                    parts.append(f", ATT={self.att_:.4f}")
+        else:
+            parts.append("not fitted")
+        parts.append(")")
+        return "".join(parts)
+
+    @property
+    def n_matched_treated_(self) -> Optional[int]:
+        """匹配成功的处理单元数量"""
+        if self.matched_treated_ is None:
+            return None
+        return len(set(self.matched_treated_))
+
+    @property
+    def n_matched_control_(self) -> Optional[int]:
+        """匹配使用的对照单元数量"""
+        if self.matched_control_ is None:
+            return None
+        return len(set(self.matched_control_))
+
+    @property
+    def n_pairs_(self) -> Optional[int]:
+        """匹配对数（k>1 时大于 treated 数量）"""
+        if self.matched_control_ is None:
+            return None
+        return len(self.matched_control_)
+
+    # ================================================================
     # 内部辅助方法
     # ================================================================
-    def _check_fitted(self):
+    def _check_fitted(self) -> None:
         if not self._is_fitted:
             raise RuntimeError("Call .fit() first")
 
-    def _check_matched(self):
+    def _check_matched(self) -> None:
         self._check_fitted()
         if not self._is_matched:
             raise RuntimeError("Call .match() first")
 
     @staticmethod
-    def _to_array(x):
+    def _to_array(x: Union[np.ndarray, pd.DataFrame, list]) -> np.ndarray:
         """将输入转为 float64 的 2D numpy 数组"""
         if hasattr(x, "values"):
             x = x.values
@@ -553,7 +677,9 @@ class PSMatcher:
         return x
 
     @staticmethod
-    def _validate_inputs(X, treatment, outcome):
+    def _validate_inputs(
+        X: np.ndarray, treatment: np.ndarray, outcome: np.ndarray
+    ) -> None:
         """验证输入数据的形状、类型和完整性"""
         n = len(X)
 

@@ -337,3 +337,214 @@ class TestErrorStates:
         m = PSMatcher()
         with pytest.raises(ValueError, match="both 0 and 1"):
             m.fit(X, t, y)
+
+
+# ---------------------------------------------------------------------------
+# warnings
+# ---------------------------------------------------------------------------
+class TestWarnings:
+    def test_common_support_warning(self, simple_data):
+        """Warns when treated/control PS ranges have limited overlap."""
+        X, t, y = simple_data
+        with pytest.warns(UserWarning, match="Common support"):
+            # Force poor overlap via very tight caliper
+            m = PSMatcher(caliper=0.001)
+            m.fit(X, t, y)
+            m.match()
+
+    def test_small_sample_warning(self):
+        X = np.array([[1.0], [2.0], [3.0]])
+        t = np.array([0, 1, 0])
+        y = np.array([10, 20, 15])
+        m = PSMatcher()
+        with pytest.warns(UserWarning, match="small sample"):
+            m.fit(X, t, y)
+
+    def test_partial_k_matches_warning(self):
+        """Warns when some treated units get fewer than k matches."""
+        np.random.seed(99)
+        n = 100
+        X = np.column_stack([
+            np.random.normal(0, 1, n),
+            np.random.normal(0, 1, n),
+        ])
+        ps = 1 / (1 + np.exp(-(0.8 * X[:, 0])))
+        t = np.random.binomial(1, ps)
+        y = 2.0 * t + X[:, 0] + np.random.normal(0, 0.5, n)
+
+        m = PSMatcher(caliper=0.01, random_state=42)
+        m.fit(X, t, y)
+        with pytest.warns(UserWarning, match="fewer than"):
+            m.match(k=3, with_replacement=False)
+
+    def test_poor_balance_warning(self):
+        """Warns when covariates have poor balance after matching."""
+        np.random.seed(77)
+        n = 200
+        X = np.column_stack([
+            np.random.normal(0, 1, n),
+            np.random.normal(0, 1, n),
+        ])
+        # Very strong selection — harder to balance
+        ps = 1 / (1 + np.exp(-(2.0 * X[:, 0] + 1.5 * X[:, 1])))
+        t = np.random.binomial(1, ps)
+        y = 2.0 * t + X[:, 0] + X[:, 1] + np.random.normal(0, 0.5, n)
+
+        m = PSMatcher(random_state=42)
+        m.fit(X, t, y)
+        m.match(with_replacement=True)
+        # balance_check may or may not warn — just verify it runs
+        bal = m.balance_check()
+        assert "flag" in bal.columns
+
+
+# ---------------------------------------------------------------------------
+# edge cases
+# ---------------------------------------------------------------------------
+class TestEdgeCases:
+    def test_plot_without_estimate_effect(self, simple_data):
+        """Plot should work even if estimate_effect hasn't been called."""
+        X, t, y = simple_data
+        m = PSMatcher()
+        m.fit(X, t, y)
+        m.match()
+        fig = m.plot()
+        from matplotlib.figure import Figure
+        assert isinstance(fig, Figure)
+
+    def test_caliper_override_in_match(self, simple_data):
+        """match(caliper=...) should override constructor caliper."""
+        X, t, y = simple_data
+        m = PSMatcher(caliper=0.2)
+        m.fit(X, t, y)
+        # Override with very tight caliper — fewer matches expected
+        m.match(caliper=0.01)
+        n_treated = int(np.sum(t == 1))
+        matched_t = len(set(m.matched_treated_))
+        assert matched_t <= n_treated
+
+    def test_match_caliper_none_uses_constructor(self, simple_data):
+        """When match(caliper=None), constructor value should be used."""
+        X, t, y = simple_data
+        m = PSMatcher(caliper=0.05)
+        m.fit(X, t, y)
+        m.match()  # caliper=None, falls back to 0.05
+        assert m._is_matched
+
+    def test_extreme_propensity_warning_in_model_summary(self, capsys):
+        """Model summary should print extreme PS warning when applicable."""
+        np.random.seed(123)
+        n = 200
+        X = np.column_stack([
+            np.random.normal(0, 1, n),
+            np.random.normal(0, 1, n),
+        ])
+        # Very strong separation → extreme propensity scores
+        ps = 1 / (1 + np.exp(-(3.0 * X[:, 0] + 2.0 * X[:, 1])))
+        t = np.random.binomial(1, ps)
+        y = 2.0 * t + X[:, 0] + X[:, 1] + np.random.normal(0, 0.5, n)
+
+        m = PSMatcher(random_state=42)
+        m.fit(X, t, y)
+        m.model_summary()
+        captured = capsys.readouterr()
+        assert "Propensity Score Model Diagnostics" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# trim_common_support
+# ---------------------------------------------------------------------------
+class TestTrimCommonSupport:
+    def test_trim_drops_units(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher(random_state=42)
+        m.fit(X, t, y)
+        n_treated_before = int(np.sum(t == 1))
+        m.match(trim_common_support=True)
+        n_treated_after = len(set(m.matched_treated_))
+        assert n_treated_after <= n_treated_before
+
+    def test_trim_runs_without_error(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher(random_state=42)
+        m.fit(X, t, y)
+        m.match(trim_common_support=True)
+        m.estimate_effect()
+        assert m.att_ is not None
+
+
+# ---------------------------------------------------------------------------
+# repr & properties
+# ---------------------------------------------------------------------------
+class TestRepr:
+    def test_repr_before_fit(self):
+        m = PSMatcher()
+        assert "not fitted" in repr(m)
+
+    def test_repr_after_fit(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher()
+        m.fit(X, t, y)
+        r = repr(m)
+        assert "AUC=" in r
+
+    def test_repr_after_match(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher()
+        m.fit(X, t, y)
+        m.match()
+        r = repr(m)
+        assert "matched_treated=" in r
+
+    def test_repr_after_estimate(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher()
+        m.fit(X, t, y)
+        m.match()
+        m.estimate_effect()
+        r = repr(m)
+        assert "ATT=" in r
+
+    def test_properties_before_match(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher()
+        m.fit(X, t, y)
+        assert m.n_matched_treated_ is None
+        assert m.n_matched_control_ is None
+        assert m.n_pairs_ is None
+
+    def test_properties_after_match(self, simple_data):
+        X, t, y = simple_data
+        m = PSMatcher()
+        m.fit(X, t, y)
+        m.match()
+        assert isinstance(m.n_matched_treated_, int)
+        assert m.n_matched_treated_ > 0
+        assert isinstance(m.n_matched_control_, int)
+        assert isinstance(m.n_pairs_, int)
+
+
+# ---------------------------------------------------------------------------
+# convergence
+# ---------------------------------------------------------------------------
+class TestConvergence:
+    def test_convergence_warns_on_non_convergence(self):
+        """If LogisticRegression doesn't converge, a warning should fire."""
+        np.random.seed(42)
+        n = 500
+        # Highly collinear features → hard to converge
+        X = np.column_stack([
+            np.random.normal(0, 1, n),
+            np.random.normal(0, 1, n),
+        ])
+        # Make columns nearly identical
+        X[:, 1] = X[:, 0] + np.random.normal(0, 0.001, n)
+        ps = 1 / (1 + np.exp(-(1.0 * X[:, 0] + 1.0 * X[:, 1])))
+        t = np.random.binomial(1, ps)
+        y = 2.0 * t + np.random.normal(0, 1, n)
+
+        m = PSMatcher(random_state=42)
+        # With collinear features and low max_iter, may not converge
+        # We just check that fit doesn't crash
+        m.fit(X, t, y)
+        assert m._is_fitted

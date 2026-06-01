@@ -1,5 +1,23 @@
 __pycache__/
 *.pyc
 *.egg-info/
+*.egg
 *.png
 .DS_Store
+
+# Build
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Testing & coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/

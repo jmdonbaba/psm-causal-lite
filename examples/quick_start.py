@@ -7,22 +7,20 @@ Scenario: Estimate causal effect of "training" on "income"
 - Outcome: income
 
 True ATT = 3.0 (known from data generation)
+
+Usage:
+    pip install -e .   # install from project root first
+    python examples/quick_start.py
 """
 
+import matplotlib
 import numpy as np
 import pandas as pd
-import sys
-import os
-import io
-
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-# Use non-interactive backend to avoid blocking on plt.show()
-import matplotlib
-matplotlib.use("Agg")
 
 from psm_causal import PSMatcher
+
+# Use non-interactive backend when running as a script
+matplotlib.use("Agg")
 
 # ================================================================
 # 1. Generate synthetic data

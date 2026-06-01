@@ -1,40 +1,33 @@
 """PSM diagnostic visualization — matplotlib only, zero extra deps"""
 
-import matplotlib
+from __future__ import annotations
+
+from typing import Optional, Tuple, List
+
 import matplotlib.pyplot as plt
 import numpy as np
-
-
-def _is_interactive():
-    """Check if we're in an interactive environment (notebook, IDE, etc.)"""
-    try:
-        get_ipython().__class__.__name__
-        return True
-    except NameError:
-        return matplotlib.get_backend().lower() in (
-            "tkagg", "qtagg", "qt5agg", "macosx",
-        )
+import pandas as pd
 
 
 def plot_psm_report(
-    propensity_scores,
-    treatment,
-    outcome,
-    matched_treated,
-    matched_control,
-    balance_df,
-    att,
-    att_ci,
-    X,
-    feature_names,
-    figsize=(12, 8),
-):
+    propensity_scores: np.ndarray,
+    treatment: np.ndarray,
+    outcome: np.ndarray,
+    matched_treated: np.ndarray,
+    matched_control: np.ndarray,
+    balance_df: pd.DataFrame,
+    att: Optional[float],
+    att_ci: Optional[Tuple[float, float]],
+    X: Optional[np.ndarray],
+    feature_names: Optional[List[str]],
+    figsize: Tuple[float, float] = (12, 8),
+) -> plt.Figure:
     """4-panel PSM diagnostic report
 
     Panel 1: Propensity score distribution (before matching)
     Panel 2: Covariate balance SMD (before vs after)
     Panel 3: ATT — violin plots of matched outcomes
-    Panel 4: Distribution of first covariate across groups
+    Panel 4: Distribution of most imbalanced covariate across groups
     """
     fig, axes = plt.subplots(2, 2, figsize=figsize)
 
@@ -112,7 +105,7 @@ def plot_psm_report(
         ci_str = f"  [{att_ci[0]:.4f}, {att_ci[1]:.4f}]"
         ax.set_title(f"ATT = {att:.4f}{ci_str}")
 
-    # ---- Panel 4: First Covariate Distribution ----
+    # ---- Panel 4: Most Imbalanced Covariate Distribution ----
     ax = axes[1, 1]
     c_matched = np.zeros(len(treatment), dtype=bool)
     c_matched[matched_control] = True
@@ -120,9 +113,14 @@ def plot_psm_report(
     t_matched[matched_treated] = True
 
     if n_feat > 0 and X is not None:
-        idx = 0
+        # Pick the covariate with the largest pre-matching SMD
+        idx = int(balance_df["SMD_before"].abs().idxmax())
         x_col = X[:, idx]
-        fname = feature_names[idx] if feature_names else "X0"
+        fname = (
+            feature_names[idx]
+            if feature_names is not None
+            else f"X{idx}"
+        )
 
         positions = [
             ("Treated\n(Before)", t_mask),
